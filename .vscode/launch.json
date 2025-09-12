@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Launch Full App",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:3000",
+      "webRoot": "${workspaceFolder}/frontend/src",
+      "preLaunchTask": "Run Flask Backend"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Run Full App (Frontend + Backend)",
+      "configurations": ["Launch Full App"],
+      "preLaunchTask": "Run React Frontend"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+Flask
+requests
+python-dotenv
+moviepy
+gTTS
+numpy
+Pillow
+imageio
+imageio-ffmpeg
