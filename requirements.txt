@@ -7,3 +7,4 @@ numpy
 Pillow
 imageio
 imageio-ffmpeg
+gunicorn
