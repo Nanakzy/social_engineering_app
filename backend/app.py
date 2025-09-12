@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from flask_cors import CORS
 import os
 from scenarios import scenarios
-from backend.generate_local import generate_video_from_scenario
+from generate_local import generate_video_from_scenario
 
 
 load_dotenv()
