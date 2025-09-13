@@ -1,72 +1,119 @@
 #!/usr/bin/env python3
+import os
+import tempfile
+import shutil
+import subprocess
+import json
 from gtts import gTTS
-from moviepy.editor import *
-import tempfile, os
-from unsplash_client import fetch_image
+from PIL import Image, ImageDraw, ImageFont
 
-def generate_video_from_scenario(scenario, width=1280, height=720, fps=24, bg_music_path=None):
-    # Ensure folders exist
-    os.makedirs("assets", exist_ok=True)
-    os.makedirs("videos", exist_ok=True)
+def generate_slide_image(text, path, width=1280, height=720):
+    """Render text onto a white background and save as PNG."""
+    img = Image.new("RGB", (width, height), color=(240, 240, 240))
+    draw = ImageDraw.Draw(img)
 
-    # Try to get background image
-    bg_path = scenario.get("background")
-    if not bg_path:
-        query = scenario["title"]
-        bg_path = f"assets/{scenario['id']}.jpg"
-        if not os.path.exists(bg_path):
-            fetch_image(query, bg_path)
+    try:
+        font = ImageFont.truetype("arial.ttf", 40)
+    except OSError:
+        font = ImageFont.load_default()
 
-    if bg_path and os.path.exists(bg_path):
-        background = ImageClip(bg_path).resize((width, height))
-    else:
-        background = ColorClip(size=(width, height), color=(240, 240, 240))
+    lines, line, max_width = [], [], width - 200
+    for word in text.split():
+        test_line = " ".join(line + [word])
+        if draw.textlength(test_line, font=font) > max_width:
+            lines.append(" ".join(line))
+            line = [word]
+        else:
+            line.append(word)
+    if line:
+        lines.append(" ".join(line))
 
-    clips = []
-    for f in scenario['frames']:
-        # Estimate duration based on words (0.5s per word, min 4s)
-        slide_duration = max(4, len(f.split()) * 0.5)
+    line_height = int(font.size * 1.2) if hasattr(font, "size") else 48
+    y = max(50, (height - len(lines) * line_height) // 2)
+    for l in lines:
+        w = draw.textlength(l, font=font)
+        draw.text(((width - w) // 2, y), l, font=font, fill="black")
+        y += line_height
 
-        txt = TextClip(f, fontsize=40, color="black", font="Arial-Bold",
-                       method="caption", size=(width-200, None), align="center")
+    img.save(path)
 
-        overlay = txt.on_color(size=(width-100, txt.h+60),
-                               color=(255, 255, 255), col_opacity=0.7)
+def _probe_duration(path: str) -> float:
+    """Return duration in seconds for an audio or video file using ffprobe."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=duration", "-of", "json", path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+        )
+        info = json.loads(result.stdout)
+        return float(info["format"]["duration"])
+    except Exception as e:
+        raise RuntimeError(f"Could not determine duration for {path}: {e}")
 
-        slide = CompositeVideoClip(
-            [background, overlay.set_position(("center", "center"))],
-            size=(width, height)
-        ).set_duration(slide_duration)
+def generate_video_from_scenario(subscenario, width=1280, height=720, fps=24, bg_music_path=None, out_dir="videos"):
+    """Generate video from scenario frames using subprocess + ffmpeg binary."""
+    os.makedirs(out_dir, exist_ok=True)
+    tmp_dir = tempfile.mkdtemp(prefix="vid_tmp_")
+    segments = []
 
-        clips.append(slide.crossfadein(1.0))
+    try:
+        for i, frame_text in enumerate(subscenario["frames"], start=1):
+            # 1) generate slide
+            img_path = os.path.join(tmp_dir, f"slide_{i}.png")
+            generate_slide_image(frame_text, img_path, width, height)
 
-    # Build video
-    video = concatenate_videoclips(clips, method="compose", padding=-1, bg_color=(240, 240, 240))
+            # 2) generate narration
+            audio_path = os.path.join(tmp_dir, f"slide_{i}.mp3")
+            gTTS(text=frame_text, lang="en").save(audio_path)
 
-    # Narration
-    tmp_dir = tempfile.mkdtemp()
-    narration = " ".join(scenario['frames'])
-    tts_path = os.path.join(tmp_dir, "narration.mp3")
-    gTTS(text=narration, lang="en").save(tts_path)
-    audio_narration = AudioFileClip(tts_path)
+            # 3) get audio duration
+            audio_dur = _probe_duration(audio_path)
+            slide_duration = max(0.5, audio_dur + 0.4)
 
-    if audio_narration.duration > video.duration:
-        audio_narration = audio_narration.subclip(0, video.duration)
+            # 4) create video segment from image + narration
+            seg_path = os.path.join(tmp_dir, f"segment_{i}.mp4")
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-loop", "1",
+                "-i", img_path,
+                "-i", audio_path,
+                "-c:v", "libx264",
+                "-t", str(slide_duration),
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                seg_path
+            ], check=True)
+            segments.append(seg_path)
 
-    # Background music (optional)
-    if bg_music_path and os.path.exists(bg_music_path):
-        bg_music = AudioFileClip(bg_music_path).volumex(0.1)
-        if bg_music.duration > video.duration:
-            bg_music = bg_music.subclip(0, video.duration)
-        final_audio = afx.audio_mix(audio_narration, bg_music)
-    else:
-        final_audio = audio_narration
+        if not segments:
+            raise ValueError("No segments created; scenario['frames'] may be empty")
 
-    # Final video with audio
-    final = video.set_audio(final_audio)
+        # 5) concat segments
+        concat_file = os.path.join(tmp_dir, "segments.txt")
+        with open(concat_file, "w", encoding="utf-8") as f:
+            for seg in segments:
+                f.write(f"file '{seg.replace('\\','/')}'\n")
 
-    # Save inside "videos/"
-    out_path = os.path.join("videos", f"scenario_{scenario['id']}.mp4")
-    final.write_videofile(out_path, codec="libx264", audio_codec="aac", fps=fps)
+        final_path = os.path.join(out_dir, f"scenario_{subscenario['id']}.mp4")
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file, "-c", "copy", final_path
+        ], check=True)
 
-    return out_path
+        # 6) optional background music mix
+        if bg_music_path and os.path.exists(bg_music_path):
+            mixed_path = final_path.replace(".mp4", "_with_music.mp4")
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", final_path,
+                "-i", bg_music_path,
+                "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=shortest:dropout_transition=2",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                mixed_path
+            ], check=True)
+            final_path = mixed_path
+
+        return final_path
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
